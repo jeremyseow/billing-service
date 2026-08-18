@@ -1,6 +1,6 @@
 ## Context
 
-See [proposal.md](file:///G:/Users/Jeremy%20Seow/Side%20Projects/pave-bank/openspec/changes/fees-and-billing-api/proposal.md) for background and motivation. This document covers the technical details of the Billing service implementation in Encore.dev using Go, PostgreSQL, and Temporal workflows.
+See [proposal.md] for background and motivation. This document covers the technical details of the Billing service implementation in Encore.dev using Go, PostgreSQL, and Temporal workflows.
 
 ## Goals / Non-Goals
 

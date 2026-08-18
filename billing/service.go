@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	"pave-bank/billing/domain"
-	"pave-bank/billing/repository"
-	"pave-bank/billing/worker"
+	"billing-service/billing/domain"
+	"billing-service/billing/repository"
+	"billing-service/billing/worker"
 
 	"encore.dev/rlog"
 	"encore.dev/storage/sqldb"

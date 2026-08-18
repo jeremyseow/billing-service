@@ -6,8 +6,8 @@ import (
 	"errors"
 	"time"
 
-	"pave-bank/billing/domain"
-	"pave-bank/billing/worker"
+	"billing-service/billing/domain"
+	"billing-service/billing/worker"
 	"encore.dev/beta/errs"
 	"encore.dev/rlog"
 	"github.com/google/uuid"
@@ -137,8 +137,17 @@ func (s *Service) AddLineItem(ctx context.Context, id string, params *AddLineIte
 		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "invalid currency"}
 	}
 
-	if s.client == nil {
-		return nil, &errs.Error{Code: errs.Unavailable, Message: "temporal client not ready"}
+	bill, err := s.repo.GetBill(ctx, id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, &errs.Error{Code: errs.NotFound, Message: "bill not found"}
+		}
+		rlog.Error("Database query error in AddLineItem checking status", "Error", err)
+		return nil, &errs.Error{Code: errs.Internal, Message: "failed to retrieve bill details"}
+	}
+
+	if bill.Status != "OPEN" {
+		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "bill is closed"}
 	}
 
 	// Synchronously send update to Temporal workflow
@@ -185,10 +194,25 @@ type CloseBillResponse struct {
 //
 //encore:api public path=/bills/:id/close method=POST
 func (s *Service) CloseBill(ctx context.Context, id string) (*CloseBillResponse, error) {
-	rlog.Info("CloseBill manual trigger endpoint called", "BillID", id)
+	bill, err := s.repo.GetBill(ctx, id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, &errs.Error{Code: errs.NotFound, Message: "bill not found"}
+		}
+		rlog.Error("Database query error in CloseBill checking status", "Error", err)
+		return nil, &errs.Error{Code: errs.Internal, Message: "failed to retrieve bill details"}
+	}
 
-	if s.client == nil {
-		return nil, &errs.Error{Code: errs.Unavailable, Message: "temporal client not ready"}
+	if bill.Status != "OPEN" {
+		summary, err := s.repo.GetBillSummary(ctx, id)
+		if err != nil {
+			return nil, &errs.Error{Code: errs.Internal, Message: "failed to retrieve finalized totals"}
+		}
+		totals := make(map[string]int64)
+		for _, t := range summary.Totals {
+			totals[t.Currency] = t.TotalMinor
+		}
+		return &CloseBillResponse{Totals: totals}, nil
 	}
 
 	updateHandle, err := s.client.UpdateWorkflow(ctx, client.UpdateWorkflowOptions{
@@ -219,10 +243,28 @@ type TerminateBillResponse struct {
 //
 //encore:api public path=/bills/:id/terminate method=POST
 func (s *Service) TerminateBill(ctx context.Context, id string) (*TerminateBillResponse, error) {
-	rlog.Info("TerminateBill manual trigger endpoint called", "BillID", id)
+	bill, err := s.repo.GetBill(ctx, id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, &errs.Error{Code: errs.NotFound, Message: "bill not found"}
+		}
+		rlog.Error("Database query error in TerminateBill checking status", "Error", err)
+		return nil, &errs.Error{Code: errs.Internal, Message: "failed to retrieve bill details"}
+	}
 
-	if s.client == nil {
-		return nil, &errs.Error{Code: errs.Unavailable, Message: "temporal client not ready"}
+	if bill.Status != "OPEN" {
+		if bill.Status == "TERMINATED" {
+			summary, err := s.repo.GetBillSummary(ctx, id)
+			if err != nil {
+				return nil, &errs.Error{Code: errs.Internal, Message: "failed to retrieve finalized totals"}
+			}
+			totals := make(map[string]int64)
+			for _, t := range summary.Totals {
+				totals[t.Currency] = t.TotalMinor
+			}
+			return &TerminateBillResponse{Totals: totals}, nil
+		}
+		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "bill is closed"}
 	}
 
 	updateHandle, err := s.client.UpdateWorkflow(ctx, client.UpdateWorkflowOptions{

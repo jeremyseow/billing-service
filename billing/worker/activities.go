@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"pave-bank/billing/domain"
+	"billing-service/billing/domain"
 	"encore.dev/rlog"
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"

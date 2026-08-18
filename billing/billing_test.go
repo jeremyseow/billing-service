@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"pave-bank/billing/repository"
-	"pave-bank/billing/worker"
+	"billing-service/billing/repository"
+	"billing-service/billing/worker"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"go.temporal.io/sdk/client"

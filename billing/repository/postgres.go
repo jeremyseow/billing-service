@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"pave-bank/billing/domain"
+	"billing-service/billing/domain"
 	"encore.dev/storage/sqldb"
 )
 
