@@ -11,21 +11,21 @@ A stateful, multi-currency Fees and Billing API service built with Go using the 
 
 ---
 
-## Project Structure (Clean Architecture Lite)
+## Project Structure (Clean Architecture)
 
-The codebase implements a pragmatically structured **Clean Architecture Lite** inside the `billing` service to separate delivery, business logic, persistence, and workflow orchestrations cleanly:
+The codebase is structured to separate delivery, business logic, persistence, and workflow orchestrations cleanly
 
 ```
 billing/
 ├── domain/            # Domain Layer: Core models & validation (no dependencies)
-│   ├── bill.go        # Bill entity & currency/status rules
-│   ├── line_item.go   # LineItem entity
-│   └── repository.go  # domain.Repository interface definition
-├── repository/        # Infrastructure Layer: DB access
-│   └── postgres.go    # Concrete SQL queries & transactions implementing domain.Repository
+│   ├── bill.go        
+│   ├── line_item.go   
+│   └── repository.go  # Repository interface definition
+├── repository/        # Concrete SQL queries & transactions implementing domain.Repository
+│   └── postgres.go     
 ├── worker/            # Orchestration Layer: Temporal state machines
-│   ├── workflow.go    # BillingWorkflow logic & update handlers
-│   └── activities.go  # Activities struct wrapping domain.Repository & client.Client
+│   ├── workflow.go    
+│   └── activities.go  
 ├── service.go         # Service init: Constructor DI & Temporal worker registration
 ├── api.go             # Delivery Layer: Encore REST API handlers (Service method bindings)
 ├── migrations/        # SQL Migration scripts
