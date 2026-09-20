@@ -7,6 +7,7 @@ import (
 
 	"billing-service/billing/repository"
 	"billing-service/billing/worker"
+	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"go.temporal.io/sdk/client"
@@ -58,7 +59,7 @@ func TestBillingWorkflow_SuccessfulCycle(t *testing.T) {
 		}, worker.AddLineItemInput{
 			IdempotencyKey: "item-1",
 			Description:    "valid item USD",
-			AmountMinor:    100,
+			Amount:         decimal.NewFromInt(100),
 			Currency:       "USD",
 		})
 	}, 1*time.Hour)
@@ -66,7 +67,8 @@ func TestBillingWorkflow_SuccessfulCycle(t *testing.T) {
 	// At 1 hour + 5 seconds: Verify first, send second (GEL credit)
 	env.RegisterDelayedCallback(func() {
 		assert.NoError(t, add1Err)
-		assert.Equal(t, int64(100), add1Result.Totals["USD"])
+		assert.True(t, decimal.NewFromInt(100).Equal(add1Result.OriginalTotals["USD"]))
+		assert.True(t, decimal.NewFromInt(100).Equal(add1Result.SettlementTotal))
 
 		env.UpdateWorkflow("AddLineItem", "update-id-2", &testsuite.TestUpdateCallback{
 			OnComplete: func(val interface{}, err error) {
@@ -78,7 +80,7 @@ func TestBillingWorkflow_SuccessfulCycle(t *testing.T) {
 		}, worker.AddLineItemInput{
 			IdempotencyKey: "item-2",
 			Description:    "gel credit",
-			AmountMinor:    -50,
+			Amount:         decimal.NewFromInt(-50),
 			Currency:       "GEL",
 		})
 	}, 1*time.Hour+5*time.Second)
@@ -86,7 +88,7 @@ func TestBillingWorkflow_SuccessfulCycle(t *testing.T) {
 	// At 1 hour + 10 seconds: Verify second, send third (duplicate item-1)
 	env.RegisterDelayedCallback(func() {
 		assert.NoError(t, add2Err)
-		assert.Equal(t, int64(-50), add2Result.Totals["GEL"])
+		assert.True(t, decimal.NewFromInt(-50).Equal(add2Result.OriginalTotals["GEL"]))
 
 		env.UpdateWorkflow("AddLineItem", "update-id-3", &testsuite.TestUpdateCallback{
 			OnComplete: func(val interface{}, err error) {
@@ -98,7 +100,7 @@ func TestBillingWorkflow_SuccessfulCycle(t *testing.T) {
 		}, worker.AddLineItemInput{
 			IdempotencyKey: "item-1", // duplicate key
 			Description:    "duplicate item USD",
-			AmountMinor:    200,
+			Amount:         decimal.NewFromInt(200),
 			Currency:       "USD",
 		})
 	}, 1*time.Hour+10*time.Second)
@@ -106,7 +108,7 @@ func TestBillingWorkflow_SuccessfulCycle(t *testing.T) {
 	// At 1 hour + 15 seconds: Verify third (deduplicated), send fourth (invalid currency EUR)
 	env.RegisterDelayedCallback(func() {
 		assert.NoError(t, add3Err)
-		assert.Equal(t, int64(100), add3Result.Totals["USD"]) // stays 100
+		assert.True(t, decimal.NewFromInt(100).Equal(add3Result.OriginalTotals["USD"])) // stays 100
 
 		env.UpdateWorkflow("AddLineItem", "update-id-4", &testsuite.TestUpdateCallback{
 			OnComplete: func(val interface{}, err error) {
@@ -118,7 +120,7 @@ func TestBillingWorkflow_SuccessfulCycle(t *testing.T) {
 		}, worker.AddLineItemInput{
 			IdempotencyKey: "item-4",
 			Description:    "invalid currency",
-			AmountMinor:    150,
+			Amount:         decimal.NewFromInt(150),
 			Currency:       "EUR",
 		})
 	}, 1*time.Hour+15*time.Second)
@@ -140,8 +142,8 @@ func TestBillingWorkflow_SuccessfulCycle(t *testing.T) {
 	// At 1 hour + 25 seconds: Verify close and closed totals
 	env.RegisterDelayedCallback(func() {
 		assert.NoError(t, closeErr)
-		assert.Equal(t, int64(100), closeResult.Totals["USD"])
-		assert.Equal(t, int64(-50), closeResult.Totals["GEL"])
+		assert.True(t, decimal.NewFromInt(100).Equal(closeResult.OriginalTotals["USD"]))
+		assert.True(t, decimal.NewFromInt(-50).Equal(closeResult.OriginalTotals["GEL"]))
 	}, 1*time.Hour+25*time.Second)
 
 	env.ExecuteWorkflow(worker.BillingWorkflow, params)
@@ -193,7 +195,7 @@ func TestBillingWorkflow_ClosedBillRejection(t *testing.T) {
 		}, worker.AddLineItemInput{
 			IdempotencyKey: "item-after-close",
 			Description:    "item on closed bill",
-			AmountMinor:    500,
+			Amount:         decimal.NewFromInt(500),
 			Currency:       "USD",
 		})
 	}, 1*time.Hour+5*time.Second)
@@ -320,7 +322,7 @@ func TestBillingWorkflow_TerminationCycle(t *testing.T) {
 		}, worker.AddLineItemInput{
 			IdempotencyKey: "item-1",
 			Description:    "termination item",
-			AmountMinor:    300,
+			Amount:         decimal.NewFromInt(300),
 			Currency:       "USD",
 		})
 	}, 1*time.Hour)
@@ -328,7 +330,7 @@ func TestBillingWorkflow_TerminationCycle(t *testing.T) {
 	// At 2 hours: Send TerminateBill update
 	env.RegisterDelayedCallback(func() {
 		assert.NoError(t, addErr)
-		assert.Equal(t, int64(300), addResult.Totals["USD"])
+		assert.True(t, decimal.NewFromInt(300).Equal(addResult.OriginalTotals["USD"]))
 
 		env.UpdateWorkflow("TerminateBill", "update-id-2", &testsuite.TestUpdateCallback{
 			OnComplete: func(val interface{}, err error) {
@@ -346,7 +348,7 @@ func TestBillingWorkflow_TerminationCycle(t *testing.T) {
 
 	// Assertions
 	assert.NoError(t, termErr)
-	assert.Equal(t, int64(300), termResult.Totals["USD"])
+	assert.True(t, decimal.NewFromInt(300).Equal(termResult.OriginalTotals["USD"]))
 	assert.Equal(t, "TERMINATED", closeBillCalledWithStatus)
 	assert.False(t, startNextCycleCalled)
 }

@@ -3,6 +3,8 @@ package domain
 import (
 	"errors"
 	"time"
+
+	"github.com/shopspring/decimal"
 )
 
 type Bill struct {
@@ -18,30 +20,34 @@ type Bill struct {
 }
 
 type TotalSummary struct {
-	Currency   string `json:"currency"`
-	TotalMinor int64  `json:"total_minor"`
+	Currency string          `json:"currency"`
+	Total    decimal.Decimal `json:"total"`
 }
 
 type ItemSummary struct {
-	ID             string    `json:"id"`
-	IdempotencyKey string    `json:"idempotency_key"`
-	Description    string    `json:"description"`
-	AmountMinor    int64     `json:"amount_minor"`
-	Currency       string    `json:"currency"`
-	CreatedAt      time.Time `json:"created_at"`
+	ID                 string          `json:"id"`
+	IdempotencyKey     string          `json:"idempotency_key"`
+	Description        string          `json:"description"`
+	OriginalAmount     decimal.Decimal `json:"original_amount"`
+	OriginalCurrency   string          `json:"original_currency"`
+	FXRate             decimal.Decimal `json:"fx_rate"`
+	SettlementAmount   decimal.Decimal `json:"settlement_amount"`
+	SettlementCurrency string          `json:"settlement_currency"`
+	CreatedAt          time.Time       `json:"created_at"`
 }
 
 type BillSummary struct {
-	ID                 string         `json:"id"`
-	AccountID          string         `json:"account_id"`
-	WorkflowID         string         `json:"workflow_id"`
-	PeriodStart        time.Time      `json:"period_start"`
-	PeriodEnd          time.Time      `json:"period_end"`
-	Status             string         `json:"status"`
-	SettlementCurrency string         `json:"settlement_currency"`
-	ClosedAt           *time.Time     `json:"closed_at"`
-	Totals             []TotalSummary `json:"totals"`
-	LineItems          []ItemSummary  `json:"line_items"`
+	ID                 string          `json:"id"`
+	AccountID          string          `json:"account_id"`
+	WorkflowID         string          `json:"workflow_id"`
+	PeriodStart        time.Time       `json:"period_start"`
+	PeriodEnd          time.Time       `json:"period_end"`
+	Status             string          `json:"status"`
+	SettlementCurrency string          `json:"settlement_currency"`
+	SettlementTotal    decimal.Decimal `json:"settlement_total"`
+	OriginalTotals     []TotalSummary  `json:"original_totals"`
+	LineItems          []ItemSummary   `json:"line_items"`
+	ClosedAt           *time.Time      `json:"closed_at"`
 }
 
 func (b *Bill) Validate() error {

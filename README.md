@@ -21,6 +21,8 @@ billing/
 │   ├── bill.go        
 │   ├── line_item.go   
 │   └── repository.go  # Repository interface definition
+├── rates/             # FX Engine: Rate conversion logic & currency validation
+│   └── converter.go   
 ├── repository/        # Concrete SQL queries & transactions implementing domain.Repository
 │   └── postgres.go     
 ├── worker/            # Orchestration Layer: Temporal state machines
@@ -37,8 +39,13 @@ billing/
 
 ## Considerations and Trade-offs
 
-### 1. Money representation (Avoiding Precision Errors)
-To prevent floating-point rounding issues common with float types (e.g. `0.1 + 0.2 != 0.3`), all monetary amounts are modeled as signed **64-bit integers in minor units** (`amount_minor` / `total_minor`). For example, `$1.50` is represented as `150` and a credit offset of `-$0.50` is `-50`. 
+### 1. Money Representation & Precision (`shopspring/decimal`)
+To prevent floating-point rounding issues common with native float types (e.g. `0.1 + 0.2 != 0.3`) and avoid integer truncation errors during multi-currency FX conversions, all monetary values use arbitrary-precision decimals via the **`github.com/shopspring/decimal`** package.
+
+In PostgreSQL, amounts are stored as **`NUMERIC(20, 8)`** columns (`line_items.original_amount`, `line_items.fx_rate`, `line_items.settlement_amount`, and `bill_totals.total`). This guarantees:
+- Exact decimal math without floating-point representation drift.
+- Support for micro-metered SaaS pricing (e.g., `$0.000015` per API token).
+- Seamless JSON serialization and native database scanning.
 
 ### 2. Temporal's Role (Solving Distributed Systems Problems)
 * **Race Condition Prevention**: Temporal processes all API updates for a specific workflow (bill ID) sequentially. By handling `AddLineItem` through a synchronous workflow update handler, concurrent request race conditions are mitigated automatically.
@@ -113,18 +120,19 @@ encore test -v ./billing
   ```
 
 #### 2. Add a Line Item (`POST /bills/:id/items`)
-* **What it does**: Appends a charge or credit to an active bill. Validates that the currency is USD or GEL, rejects items if the bill is closed, and deduplicates identical requests using the `idempotency_key`.
+* **What it does**: Appends a charge or credit to an active bill. Validates that the currency is USD or GEL, converts foreign currencies using exchange rates, rejects items if the bill is closed, and deduplicates identical requests using the `idempotency_key`.
 * **Curl Command** (Replace `<id>` with the bill UUID):
   ```bash
   curl http://localhost:4000/bills/<id>/items -X POST -H "Content-Type: application/json" \
-    -d '{"idempotency_key": "tx-1", "description": "Transaction Fee", "amount_minor": 150, "currency": "USD"}'
+    -d '{"idempotency_key": "tx-1", "description": "Transaction Fee", "amount": "150.50", "currency": "USD"}'
   ```
-* **Expected Result**: Returns the updated running aggregated balances by currency:
+* **Expected Result**: Returns the updated original currency breakdown and running grand total in settlement currency:
   ```json
   {
-    "totals": {
-      "USD": 150
-    }
+    "original_totals": {
+      "USD": "150.5"
+    },
+    "settlement_total": "150.5"
   }
   ```
 
@@ -137,14 +145,15 @@ encore test -v ./billing
 * **Expected Result**: Returns the final finalized totals snapshot:
   ```json
   {
-    "totals": {
-      "USD": 150
-    }
+    "original_totals": {
+      "USD": "150.5"
+    },
+    "settlement_total": "150.5"
   }
   ```
 
 #### 4. Terminate a Bill (`POST /bills/:id/terminate`)
-* **What it does**: Terminates the billing cycle permanently. finalizes the current bill under the status `TERMINATED` and blocks any future rollover periods from spawning.
+* **What it does**: Terminates the billing cycle permanently. Finalizes the current bill under the status `TERMINATED` and blocks any future rollover periods from spawning.
 * **Curl Command** (Replace `<id>` with the bill UUID):
   ```bash
   curl http://localhost:4000/bills/<id>/terminate -X POST
@@ -152,9 +161,10 @@ encore test -v ./billing
 * **Expected Result**: Returns the final totals recorded upon termination:
   ```json
   {
-    "totals": {
-      "USD": 150
-    }
+    "original_totals": {
+      "USD": "150.5"
+    },
+    "settlement_total": "150.5"
   }
   ```
 
@@ -164,7 +174,7 @@ encore test -v ./billing
   ```bash
   curl http://localhost:4000/bills/<id>
   ```
-* **Expected Result**: Returns a comprehensive JSON payload of the bill state, running/final totals, and all associated line items sorted by creation time:
+* **Expected Result**: Returns a comprehensive JSON payload of the bill state, original totals breakdown, settlement grand total, and all associated line items with FX rate audit metadata:
   ```json
   {
     "id": "c04c3185-4e7d-4fa1-85da-ecadffb10fcb",
@@ -174,11 +184,11 @@ encore test -v ./billing
     "period_end": "2026-08-25T00:00:00Z",
     "status": "OPEN",
     "settlement_currency": "USD",
-    "closed_at": null,
-    "totals": [
+    "settlement_total": "150.5",
+    "original_totals": [
       {
         "currency": "USD",
-        "total_minor": 150
+        "total": "150.5"
       }
     ],
     "line_items": [
@@ -186,10 +196,14 @@ encore test -v ./billing
         "id": "c04c3185-4e7d-4fa1-85da-ecadffb10fcb:tx-1",
         "idempotency_key": "tx-1",
         "description": "Transaction Fee",
-        "amount_minor": 150,
-        "currency": "USD",
+        "original_amount": "150.5",
+        "original_currency": "USD",
+        "fx_rate": "1",
+        "settlement_amount": "150.5",
+        "settlement_currency": "USD",
         "created_at": "2026-08-18T22:26:00Z"
       }
-    ]
+    ],
+    "closed_at": null
   }
   ```

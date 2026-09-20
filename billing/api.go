@@ -8,9 +8,11 @@ import (
 
 	"billing-service/billing/domain"
 	"billing-service/billing/worker"
+
 	"encore.dev/beta/errs"
 	"encore.dev/rlog"
 	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/temporal"
 )
@@ -119,12 +121,13 @@ func (s *Service) CreateBill(ctx context.Context, params *CreateBillParams) (*Bi
 type AddLineItemParams struct {
 	IdempotencyKey string `json:"idempotency_key"`
 	Description    string `json:"description"`
-	AmountMinor    int64  `json:"amount_minor"`
+	Amount         string `json:"amount"`
 	Currency       string `json:"currency"`
 }
 
 type AddLineItemResponse struct {
-	Totals map[string]int64 `json:"totals"`
+	OriginalTotals  map[string]decimal.Decimal `json:"original_totals"`
+	SettlementTotal decimal.Decimal            `json:"settlement_total"`
 }
 
 // AddLineItem dispatches the AddLineItem Temporal Update.
@@ -132,6 +135,11 @@ type AddLineItemResponse struct {
 //encore:api public path=/bills/:id/items method=POST
 func (s *Service) AddLineItem(ctx context.Context, id string, params *AddLineItemParams) (*AddLineItemResponse, error) {
 	rlog.Info("AddLineItem endpoint called", "BillID", id, "IdempotencyKey", params.IdempotencyKey)
+
+	amount, err := decimal.NewFromString(params.Amount)
+	if err != nil {
+		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "invalid amount format"}
+	}
 
 	if params.Currency != "USD" && params.Currency != "GEL" {
 		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "invalid currency"}
@@ -158,7 +166,7 @@ func (s *Service) AddLineItem(ctx context.Context, id string, params *AddLineIte
 		Args: []interface{}{worker.AddLineItemInput{
 			IdempotencyKey: params.IdempotencyKey,
 			Description:    params.Description,
-			AmountMinor:    params.AmountMinor,
+			Amount:         amount,
 			Currency:       params.Currency,
 		}},
 	})
@@ -183,11 +191,15 @@ func (s *Service) AddLineItem(ctx context.Context, id string, params *AddLineIte
 		return nil, &errs.Error{Code: errs.Internal, Message: err.Error()}
 	}
 
-	return &AddLineItemResponse{Totals: result.Totals}, nil
+	return &AddLineItemResponse{
+		OriginalTotals:  result.OriginalTotals,
+		SettlementTotal: result.SettlementTotal,
+	}, nil
 }
 
 type CloseBillResponse struct {
-	Totals map[string]int64 `json:"totals"`
+	OriginalTotals  map[string]decimal.Decimal `json:"original_totals"`
+	SettlementTotal decimal.Decimal            `json:"settlement_total"`
 }
 
 // CloseBill dispatches the CloseBill Temporal Update manually.
@@ -208,11 +220,14 @@ func (s *Service) CloseBill(ctx context.Context, id string) (*CloseBillResponse,
 		if err != nil {
 			return nil, &errs.Error{Code: errs.Internal, Message: "failed to retrieve finalized totals"}
 		}
-		totals := make(map[string]int64)
-		for _, t := range summary.Totals {
-			totals[t.Currency] = t.TotalMinor
+		totals := make(map[string]decimal.Decimal)
+		for _, t := range summary.OriginalTotals {
+			totals[t.Currency] = t.Total
 		}
-		return &CloseBillResponse{Totals: totals}, nil
+		return &CloseBillResponse{
+			OriginalTotals:  totals,
+			SettlementTotal: summary.SettlementTotal,
+		}, nil
 	}
 
 	updateHandle, err := s.client.UpdateWorkflow(ctx, client.UpdateWorkflowOptions{
@@ -232,11 +247,15 @@ func (s *Service) CloseBill(ctx context.Context, id string) (*CloseBillResponse,
 		return nil, &errs.Error{Code: errs.Internal, Message: err.Error()}
 	}
 
-	return &CloseBillResponse{Totals: result.Totals}, nil
+	return &CloseBillResponse{
+		OriginalTotals:  result.OriginalTotals,
+		SettlementTotal: result.SettlementTotal,
+	}, nil
 }
 
 type TerminateBillResponse struct {
-	Totals map[string]int64 `json:"totals"`
+	OriginalTotals  map[string]decimal.Decimal `json:"original_totals"`
+	SettlementTotal decimal.Decimal            `json:"settlement_total"`
 }
 
 // TerminateBill dispatches the TerminateBill Temporal Update to close the bill permanently.
@@ -258,11 +277,14 @@ func (s *Service) TerminateBill(ctx context.Context, id string) (*TerminateBillR
 			if err != nil {
 				return nil, &errs.Error{Code: errs.Internal, Message: "failed to retrieve finalized totals"}
 			}
-			totals := make(map[string]int64)
-			for _, t := range summary.Totals {
-				totals[t.Currency] = t.TotalMinor
+			totals := make(map[string]decimal.Decimal)
+			for _, t := range summary.OriginalTotals {
+				totals[t.Currency] = t.Total
 			}
-			return &TerminateBillResponse{Totals: totals}, nil
+			return &TerminateBillResponse{
+				OriginalTotals:  totals,
+				SettlementTotal: summary.SettlementTotal,
+			}, nil
 		}
 		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "bill is closed"}
 	}
@@ -284,7 +306,10 @@ func (s *Service) TerminateBill(ctx context.Context, id string) (*TerminateBillR
 		return nil, &errs.Error{Code: errs.Internal, Message: err.Error()}
 	}
 
-	return &TerminateBillResponse{Totals: result.Totals}, nil
+	return &TerminateBillResponse{
+		OriginalTotals:  result.OriginalTotals,
+		SettlementTotal: result.SettlementTotal,
+	}, nil
 }
 
 // GetBill queries PostgreSQL directly joining bills, bill_totals, and line_items.

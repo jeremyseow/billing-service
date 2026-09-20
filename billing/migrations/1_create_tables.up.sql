@@ -16,8 +16,11 @@ CREATE TABLE line_items (
     bill_id VARCHAR(64) NOT NULL REFERENCES bills(id),
     idempotency_key VARCHAR(128) NOT NULL,
     description TEXT NOT NULL,
-    amount_minor BIGINT NOT NULL,
-    currency VARCHAR(3) NOT NULL,
+    original_amount NUMERIC(20, 8) NOT NULL,
+    original_currency VARCHAR(3) NOT NULL,
+    fx_rate NUMERIC(20, 8) NOT NULL,
+    settlement_amount NUMERIC(20, 8) NOT NULL,
+    settlement_currency VARCHAR(3) NOT NULL,
     created_at TIMESTAMPTZ NOT NULL,
     UNIQUE(bill_id, idempotency_key)
 );
@@ -25,7 +28,7 @@ CREATE TABLE line_items (
 CREATE TABLE bill_totals (
     bill_id VARCHAR(64) NOT NULL REFERENCES bills(id),
     currency VARCHAR(3) NOT NULL,
-    total_minor BIGINT NOT NULL,
+    total NUMERIC(20, 8) NOT NULL,
     PRIMARY KEY(bill_id, currency)
 );
 

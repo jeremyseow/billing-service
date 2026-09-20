@@ -6,6 +6,7 @@ import (
 
 	"billing-service/billing/domain"
 	"encore.dev/storage/sqldb"
+	"github.com/shopspring/decimal"
 )
 
 type PostgresRepository struct {
@@ -60,9 +61,9 @@ func (r *PostgresRepository) GetBillSummary(ctx context.Context, id string) (*do
 		return nil, err
 	}
 
-	// Query totals
+	// Query original totals breakdown
 	rowsTotals, err := r.db.Query(ctx, `
-		SELECT currency, total_minor
+		SELECT currency, total
 		FROM bill_totals
 		WHERE bill_id = $1
 	`, id)
@@ -71,18 +72,18 @@ func (r *PostgresRepository) GetBillSummary(ctx context.Context, id string) (*do
 	}
 	defer rowsTotals.Close()
 
-	summary.Totals = []domain.TotalSummary{}
+	summary.OriginalTotals = []domain.TotalSummary{}
 	for rowsTotals.Next() {
 		var ts domain.TotalSummary
-		if err := rowsTotals.Scan(&ts.Currency, &ts.TotalMinor); err != nil {
+		if err := rowsTotals.Scan(&ts.Currency, &ts.Total); err != nil {
 			return nil, err
 		}
-		summary.Totals = append(summary.Totals, ts)
+		summary.OriginalTotals = append(summary.OriginalTotals, ts)
 	}
 
-	// Query line items
+	// Query line items and compute overall settlement total
 	rowsItems, err := r.db.Query(ctx, `
-		SELECT id, idempotency_key, description, amount_minor, currency, created_at
+		SELECT id, idempotency_key, description, original_amount, original_currency, fx_rate, settlement_amount, settlement_currency, created_at
 		FROM line_items
 		WHERE bill_id = $1
 		ORDER BY created_at ASC
@@ -93,12 +94,14 @@ func (r *PostgresRepository) GetBillSummary(ctx context.Context, id string) (*do
 	defer rowsItems.Close()
 
 	summary.LineItems = []domain.ItemSummary{}
+	summary.SettlementTotal = decimal.Zero
 	for rowsItems.Next() {
 		var item domain.ItemSummary
-		if err := rowsItems.Scan(&item.ID, &item.IdempotencyKey, &item.Description, &item.AmountMinor, &item.Currency, &item.CreatedAt); err != nil {
+		if err := rowsItems.Scan(&item.ID, &item.IdempotencyKey, &item.Description, &item.OriginalAmount, &item.OriginalCurrency, &item.FXRate, &item.SettlementAmount, &item.SettlementCurrency, &item.CreatedAt); err != nil {
 			return nil, err
 		}
 		summary.LineItems = append(summary.LineItems, item)
+		summary.SettlementTotal = summary.SettlementTotal.Add(item.SettlementAmount)
 	}
 
 	return &summary, nil
@@ -106,14 +109,14 @@ func (r *PostgresRepository) GetBillSummary(ctx context.Context, id string) (*do
 
 func (r *PostgresRepository) SaveLineItem(ctx context.Context, item *domain.LineItem) error {
 	_, err := r.db.Exec(ctx, `
-		INSERT INTO line_items (id, bill_id, idempotency_key, description, amount_minor, currency, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, NOW())
+		INSERT INTO line_items (id, bill_id, idempotency_key, description, original_amount, original_currency, fx_rate, settlement_amount, settlement_currency, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
 		ON CONFLICT (bill_id, idempotency_key) DO NOTHING
-	`, item.ID, item.BillID, item.IdempotencyKey, item.Description, item.AmountMinor, item.Currency)
+	`, item.ID, item.BillID, item.IdempotencyKey, item.Description, item.OriginalAmount, item.OriginalCurrency, item.FXRate, item.SettlementAmount, item.SettlementCurrency)
 	return err
 }
 
-func (r *PostgresRepository) CloseBill(ctx context.Context, id string, status string, closedAt time.Time, totals map[string]int64) error {
+func (r *PostgresRepository) CloseBill(ctx context.Context, id string, status string, closedAt time.Time, totals map[string]decimal.Decimal) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return err
@@ -129,13 +132,13 @@ func (r *PostgresRepository) CloseBill(ctx context.Context, id string, status st
 		return err
 	}
 
-	for currency, totalMinor := range totals {
+	for currency, total := range totals {
 		_, err = tx.Exec(ctx, `
-			INSERT INTO bill_totals (bill_id, currency, total_minor)
+			INSERT INTO bill_totals (bill_id, currency, total)
 			VALUES ($1, $2, $3)
 			ON CONFLICT (bill_id, currency) DO UPDATE
-			SET total_minor = EXCLUDED.total_minor
-		`, id, currency, totalMinor)
+			SET total = EXCLUDED.total
+		`, id, currency, total)
 		if err != nil {
 			return err
 		}

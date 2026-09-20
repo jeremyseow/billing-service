@@ -1,13 +1,20 @@
 package domain
 
-import "time"
+import (
+	"time"
+
+	"github.com/shopspring/decimal"
+)
 
 type LineItem struct {
-	ID             string
-	BillID         string
-	IdempotencyKey string
-	Description    string
-	AmountMinor    int64
-	Currency       string
-	CreatedAt      time.Time
+	ID                 string
+	BillID             string
+	IdempotencyKey     string
+	Description        string
+	OriginalAmount     decimal.Decimal
+	OriginalCurrency   string
+	FXRate             decimal.Decimal
+	SettlementAmount   decimal.Decimal
+	SettlementCurrency string
+	CreatedAt          time.Time
 }

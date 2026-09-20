@@ -3,12 +3,14 @@ package worker
 import (
 	"time"
 
+	"billing-service/billing/rates"
+
+	"github.com/shopspring/decimal"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 )
 
 var activities *Activities
-
 
 type BillingWorkflowParams struct {
 	BillID             string    `json:"bill_id"`
@@ -19,26 +21,29 @@ type BillingWorkflowParams struct {
 }
 
 type AddLineItemInput struct {
-	IdempotencyKey string `json:"idempotency_key"`
-	Description    string `json:"description"`
-	AmountMinor    int64  `json:"amount_minor"`
-	Currency       string `json:"currency"`
+	IdempotencyKey string          `json:"idempotency_key"`
+	Description    string          `json:"description"`
+	Amount         decimal.Decimal `json:"amount"`
+	Currency       string          `json:"currency"`
 }
 
 type AddLineItemResult struct {
-	Totals map[string]int64 `json:"totals"`
+	OriginalTotals  map[string]decimal.Decimal `json:"original_totals"`
+	SettlementTotal decimal.Decimal            `json:"settlement_total"`
 }
 
 type CloseBillResult struct {
-	Totals map[string]int64 `json:"totals"`
+	OriginalTotals  map[string]decimal.Decimal `json:"original_totals"`
+	SettlementTotal decimal.Decimal            `json:"settlement_total"`
 }
 
 type WorkflowState struct {
-	Status               string           `json:"status"`
-	CurrencyTotals       map[string]int64 `json:"currency_totals"`
-	ProcessedIdempotency map[string]bool  `json:"processed_idempotency"`
-	ManualCloseTriggered bool             `json:"manual_close_triggered"`
-	IsTerminated         bool             `json:"is_terminated"`
+	Status               string                     `json:"status"`
+	OriginalTotals       map[string]decimal.Decimal `json:"original_totals"`
+	SettlementTotal      decimal.Decimal            `json:"settlement_total"`
+	ProcessedIdempotency map[string]bool            `json:"processed_idempotency"`
+	ManualCloseTriggered bool                       `json:"manual_close_triggered"`
+	IsTerminated         bool                       `json:"is_terminated"`
 }
 
 func BillingWorkflow(ctx workflow.Context, params BillingWorkflowParams) error {
@@ -47,7 +52,8 @@ func BillingWorkflow(ctx workflow.Context, params BillingWorkflowParams) error {
 
 	state := WorkflowState{
 		Status:               "OPEN",
-		CurrencyTotals:       make(map[string]int64),
+		OriginalTotals:       make(map[string]decimal.Decimal),
+		SettlementTotal:      decimal.Zero,
 		ProcessedIdempotency: make(map[string]bool),
 		ManualCloseTriggered: false,
 		IsTerminated:         false,
@@ -55,7 +61,7 @@ func BillingWorkflow(ctx workflow.Context, params BillingWorkflowParams) error {
 
 	// Register synchronous update handler for AddLineItem
 	err := workflow.SetUpdateHandler(ctx, "AddLineItem", func(ctx workflow.Context, input AddLineItemInput) (AddLineItemResult, error) {
-		logger.Info("Received AddLineItem update request", "IdempotencyKey", input.IdempotencyKey, "Currency", input.Currency, "AmountMinor", input.AmountMinor)
+		logger.Info("Received AddLineItem update request", "IdempotencyKey", input.IdempotencyKey, "Currency", input.Currency, "Amount", input.Amount)
 
 		if state.Status != "OPEN" {
 			logger.Warn("Rejecting AddLineItem: bill is closed", "BillID", params.BillID)
@@ -69,7 +75,7 @@ func BillingWorkflow(ctx workflow.Context, params BillingWorkflowParams) error {
 
 		if state.ProcessedIdempotency[input.IdempotencyKey] {
 			logger.Info("AddLineItem: duplicate key ignored (idempotent)", "IdempotencyKey", input.IdempotencyKey)
-			return AddLineItemResult{Totals: state.CurrencyTotals}, nil
+			return AddLineItemResult{OriginalTotals: state.OriginalTotals, SettlementTotal: state.SettlementTotal}, nil
 		}
 
 		// Execute activity to persist the line item in PostgreSQL
@@ -84,12 +90,13 @@ func BillingWorkflow(ctx workflow.Context, params BillingWorkflowParams) error {
 		ctxWithAO := workflow.WithActivityOptions(ctx, ao)
 
 		err := workflow.ExecuteActivity(ctxWithAO, activities.PersistLineItemActivity, PersistLineItemParams{
-			ID:             workflow.GetInfo(ctx).WorkflowExecution.ID + ":" + input.IdempotencyKey, // unique row primary key
-			BillID:         params.BillID,
-			IdempotencyKey: input.IdempotencyKey,
-			Description:    input.Description,
-			AmountMinor:    input.AmountMinor,
-			Currency:       input.Currency,
+			ID:                 workflow.GetInfo(ctx).WorkflowExecution.ID + ":" + input.IdempotencyKey, // unique row primary key
+			BillID:             params.BillID,
+			IdempotencyKey:     input.IdempotencyKey,
+			Description:        input.Description,
+			Amount:             input.Amount,
+			Currency:           input.Currency,
+			SettlementCurrency: params.SettlementCurrency,
 		}).Get(ctx, nil)
 		if err != nil {
 			logger.Error("PersistLineItemActivity failed", "Error", err)
@@ -98,10 +105,14 @@ func BillingWorkflow(ctx workflow.Context, params BillingWorkflowParams) error {
 
 		// Update in-memory state
 		state.ProcessedIdempotency[input.IdempotencyKey] = true
-		state.CurrencyTotals[input.Currency] += input.AmountMinor
+		state.OriginalTotals[input.Currency] = state.OriginalTotals[input.Currency].Add(input.Amount)
 
-		logger.Info("Successfully processed line item", "IdempotencyKey", input.IdempotencyKey, "NewTotals", state.CurrencyTotals)
-		return AddLineItemResult{Totals: state.CurrencyTotals}, nil
+		// Calculate settlement conversion for running settlement total
+		settlementAmount, _, _ := rates.ConvertRates(input.Currency, params.SettlementCurrency, input.Amount)
+		state.SettlementTotal = state.SettlementTotal.Add(settlementAmount)
+
+		logger.Info("Successfully processed line item", "IdempotencyKey", input.IdempotencyKey, "OriginalTotals", state.OriginalTotals, "SettlementTotal", state.SettlementTotal)
+		return AddLineItemResult{OriginalTotals: state.OriginalTotals, SettlementTotal: state.SettlementTotal}, nil
 	})
 	if err != nil {
 		return err
@@ -111,10 +122,10 @@ func BillingWorkflow(ctx workflow.Context, params BillingWorkflowParams) error {
 	err = workflow.SetUpdateHandler(ctx, "CloseBill", func(ctx workflow.Context) (CloseBillResult, error) {
 		logger.Info("Received CloseBill update request", "BillID", params.BillID)
 		if state.Status != "OPEN" {
-			return CloseBillResult{Totals: state.CurrencyTotals}, nil
+			return CloseBillResult{OriginalTotals: state.OriginalTotals, SettlementTotal: state.SettlementTotal}, nil
 		}
 		state.ManualCloseTriggered = true
-		return CloseBillResult{Totals: state.CurrencyTotals}, nil
+		return CloseBillResult{OriginalTotals: state.OriginalTotals, SettlementTotal: state.SettlementTotal}, nil
 	})
 	if err != nil {
 		return err
@@ -124,11 +135,11 @@ func BillingWorkflow(ctx workflow.Context, params BillingWorkflowParams) error {
 	err = workflow.SetUpdateHandler(ctx, "TerminateBill", func(ctx workflow.Context) (CloseBillResult, error) {
 		logger.Info("Received TerminateBill update request", "BillID", params.BillID)
 		if state.Status != "OPEN" {
-			return CloseBillResult{Totals: state.CurrencyTotals}, nil
+			return CloseBillResult{OriginalTotals: state.OriginalTotals, SettlementTotal: state.SettlementTotal}, nil
 		}
 		state.ManualCloseTriggered = true
 		state.IsTerminated = true
-		return CloseBillResult{Totals: state.CurrencyTotals}, nil
+		return CloseBillResult{OriginalTotals: state.OriginalTotals, SettlementTotal: state.SettlementTotal}, nil
 	})
 	if err != nil {
 		return err
@@ -168,7 +179,7 @@ func BillingWorkflow(ctx workflow.Context, params BillingWorkflowParams) error {
 	err = workflow.ExecuteActivity(ctxWithAO, activities.CloseBillActivity, CloseBillParams{
 		BillID:   params.BillID,
 		ClosedAt: workflow.Now(ctx),
-		Totals:   state.CurrencyTotals,
+		Totals:   state.OriginalTotals,
 		Status:   targetStatus,
 	}).Get(ctx, nil)
 	if err != nil {

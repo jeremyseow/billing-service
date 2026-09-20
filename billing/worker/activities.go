@@ -6,10 +6,14 @@ import (
 	"time"
 
 	"billing-service/billing/domain"
+	"billing-service/billing/rates"
+
 	"encore.dev/rlog"
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/shopspring/decimal"
 	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/temporal"
 )
 
 var (
@@ -23,7 +27,7 @@ var (
 	}, []string{"currency"})
 	billingFailuresCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "billing_failures_total",
-		Help: "Total number of failures encountered during billing operations.",
+		Help: "Total number of billing operation failures.",
 	}, []string{"operation"})
 )
 
@@ -46,27 +50,38 @@ func NewActivities(repo domain.Repository, temporalClient client.Client) *Activi
 }
 
 type PersistLineItemParams struct {
-	ID             string `json:"id"`
-	BillID         string `json:"bill_id"`
-	IdempotencyKey string `json:"idempotency_key"`
-	Description    string `json:"description"`
-	AmountMinor    int64  `json:"amount_minor"`
-	Currency       string `json:"currency"`
+	ID                 string          `json:"id"`
+	BillID             string          `json:"bill_id"`
+	IdempotencyKey     string          `json:"idempotency_key"`
+	Description        string          `json:"description"`
+	Amount             decimal.Decimal `json:"amount"`
+	Currency           string          `json:"currency"`
+	SettlementCurrency string          `json:"settlement_currency"`
 }
 
 func (a *Activities) PersistLineItemActivity(ctx context.Context, params PersistLineItemParams) error {
 	rlog.Info("Executing PersistLineItemActivity", "BillID", params.BillID, "IdempotencyKey", params.IdempotencyKey)
 
-	item := &domain.LineItem{
-		ID:             params.ID,
-		BillID:         params.BillID,
-		IdempotencyKey: params.IdempotencyKey,
-		Description:    params.Description,
-		AmountMinor:    params.AmountMinor,
-		Currency:       params.Currency,
+	settlementAmount, fxRate, err := rates.ConvertRates(params.Currency, params.SettlementCurrency, params.Amount)
+	if err != nil {
+		rlog.Error("Failed to convert rates", "Error", err)
+		billingFailuresCounter.WithLabelValues("rates_conversion").Inc()
+		return temporal.NewNonRetryableApplicationError(err.Error(), "ErrInvalidCurrency", err)
 	}
 
-	err := a.Repo.SaveLineItem(ctx, item)
+	item := &domain.LineItem{
+		ID:                 params.ID,
+		BillID:             params.BillID,
+		IdempotencyKey:     params.IdempotencyKey,
+		Description:        params.Description,
+		OriginalAmount:     params.Amount,
+		OriginalCurrency:   params.Currency,
+		FXRate:             fxRate,
+		SettlementAmount:   settlementAmount,
+		SettlementCurrency: params.SettlementCurrency,
+	}
+
+	err = a.Repo.SaveLineItem(ctx, item)
 	if err != nil {
 		rlog.Error("Failed to persist line item in database", "Error", err)
 		billingFailuresCounter.WithLabelValues("persist_line_item").Inc()
@@ -79,10 +94,10 @@ func (a *Activities) PersistLineItemActivity(ctx context.Context, params Persist
 }
 
 type CloseBillParams struct {
-	BillID   string           `json:"bill_id"`
-	ClosedAt time.Time        `json:"closed_at"`
-	Totals   map[string]int64 `json:"totals"`
-	Status   string           `json:"status"`
+	BillID   string                     `json:"bill_id"`
+	ClosedAt time.Time                  `json:"closed_at"`
+	Totals   map[string]decimal.Decimal `json:"totals"`
+	Status   string                     `json:"status"`
 }
 
 func (a *Activities) CloseBillActivity(ctx context.Context, params CloseBillParams) error {

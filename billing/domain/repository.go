@@ -3,6 +3,8 @@ package domain
 import (
 	"context"
 	"time"
+
+	"github.com/shopspring/decimal"
 )
 
 type Repository interface {
@@ -10,6 +12,6 @@ type Repository interface {
 	GetBill(ctx context.Context, id string) (*Bill, error)
 	GetBillSummary(ctx context.Context, id string) (*BillSummary, error)
 	SaveLineItem(ctx context.Context, item *LineItem) error
-	CloseBill(ctx context.Context, id string, status string, closedAt time.Time, totals map[string]int64) error
+	CloseBill(ctx context.Context, id string, status string, closedAt time.Time, totals map[string]decimal.Decimal) error
 	CheckActiveBillExists(ctx context.Context, accountID string, excludePeriodStart time.Time) (bool, error)
 }
